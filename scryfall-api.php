@@ -40,7 +40,7 @@ function prepare_value($field, $value)
     return is_array($value) ? json_encode($value) : $value;
 }
 
-function insert_card($conn, $card)
+function insert_or_update_card($conn, $card)
 {
     // Campos que potencialmente pueden estar presentes en los datos de la carta
     $possible_fields = [
@@ -72,7 +72,7 @@ function insert_card($conn, $card)
 
     // Construir la consulta SQL
     $sql = sprintf(
-        "INSERT INTO cards (%s) VALUES (%s)",
+        "INSERT IGNORE INTO cards (%s) VALUES (%s)",
         implode(", ", $fields),
         implode(", ", $placeholders)
     );
@@ -84,7 +84,7 @@ function insert_card($conn, $card)
     $stmt->bind_param($types, ...$values);
 
     if ($stmt->execute() === TRUE) {
-        echo "Registro insertado con éxito<br>";
+        echo "Registro insertado con éxito o ignorado si ya existe<br>";
     } else {
         echo "Error: " . $stmt->error . "<br>";
     }
@@ -97,7 +97,7 @@ try {
     $data = fetch_cards();
     if (isset($data['data']) && is_array($data['data'])) {
         foreach ($data['data'] as $card) {
-            insert_card($conn, $card);
+            insert_or_update_card($conn, $card);
         }
     } else {
         throw new Exception("La respuesta de la API no contiene datos válidos.");
