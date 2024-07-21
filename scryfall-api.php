@@ -12,37 +12,32 @@ $conn = new mysqli($servername, $username, $password, $dbname);
 if ($conn->connect_error) {
     die("Conexión fallida: " . $conn->connect_error);
 }
+ini_set('memory_limit', '1024M');
+set_time_limit(0);
 
-function fetch_cards()
+function delay($milliseconds)
 {
-    $url = "https://api.scryfall.com/cards/search?q=all";
+    usleep($milliseconds * 1000); // Convertir milisegundos a microsegundos
+}
+
+function fetch_cards_page($page)
+{
+    $url = "https://api.scryfall.com/cards/search?q=*&page=$page";
     $response = file_get_contents($url);
     if ($response !== FALSE) {
-        return json_decode($response, true);
+        $data = json_decode($response, true);
+        if (isset($data['data']) && is_array($data['data'])) {
+            return $data;
+        } else {
+            throw new Exception("La respuesta de la API no contiene datos válidos.");
+        }
     } else {
         throw new Exception("Error fetching data");
     }
 }
 
-function prepare_value($field, $value)
-{
-    if ($value === '' || $value === null) {
-        return NULL;
-    }
-    // Check for boolean fields
-    if (in_array($field, ['reserved', 'foil', 'nonfoil', 'oversized', 'promo', 'reprint', 'digital', 'full_art', 'textless', 'booster', 'story_spotlight'])) {
-        return (int)$value;
-    }
-    // Check for integer fields
-    if (in_array($field, ['cmc', 'edhrec_rank', 'penny_rank'])) {
-        return (int)$value;
-    }
-    return is_array($value) ? json_encode($value) : $value;
-}
-
 function insert_or_update_card($conn, $card)
 {
-    // Campos que potencialmente pueden estar presentes en los datos de la carta
     $possible_fields = [
         'id', 'oracle_id', 'multiverse_ids', 'mtgo_id', 'mtgo_foil_id', 'arena_id', 'tcgplayer_id', 'cardmarket_id', 'name', 'lang',
         'released_at', 'uri', 'scryfall_uri', 'layout', 'highres_image', 'image_status', 'image_uris', 'mana_cost', 'cmc', 'type_line',
@@ -53,7 +48,6 @@ function insert_or_update_card($conn, $card)
         'penny_rank', 'prices', 'related_uris', 'purchase_uris'
     ];
 
-    // Filtrar los campos que están presentes en los datos de la carta
     $fields = [];
     $values = [];
     $placeholders = [];
@@ -70,21 +64,21 @@ function insert_or_update_card($conn, $card)
         throw new Exception("No valid fields to insert for card");
     }
 
-    // Construir la consulta SQL
     $sql = sprintf(
-        "INSERT IGNORE INTO cards (%s) VALUES (%s)",
+        "INSERT INTO cards (%s) VALUES (%s) ON DUPLICATE KEY UPDATE %s",
         implode(", ", $fields),
-        implode(", ", $placeholders)
+        implode(", ", $placeholders),
+        implode(", ", array_map(function ($field) {
+            return "$field = VALUES($field)";
+        }, $fields))
     );
 
     $stmt = $conn->prepare($sql);
-
-    // Generar los tipos de parámetros para bind_param
-    $types = str_repeat('s', count($values));
+    $types = determine_param_types($values);
     $stmt->bind_param($types, ...$values);
 
     if ($stmt->execute() === TRUE) {
-        echo "Registro insertado con éxito o ignorado si ya existe<br>";
+        echo "Registro insertado o actualizado con éxito<br>";
     } else {
         echo "Error: " . $stmt->error . "<br>";
     }
@@ -92,19 +86,64 @@ function insert_or_update_card($conn, $card)
     $stmt->close();
 }
 
-// Ejemplo de uso
+function prepare_value($field, $value)
+{
+    if (is_array($value)) {
+        return json_encode($value);
+    }
+
+    $integer_fields = ['cmc', 'reserved', 'foil', 'nonfoil', 'oversized', 'promo', 'reprint', 'variation', 'digital', 'full_art', 'textless', 'booster', 'story_spotlight', 'edhrec_rank', 'penny_rank', 'highres_image', 'collector_number'];
+    $boolean_fields = ['reserved', 'foil', 'nonfoil', 'oversized', 'promo', 'reprint', 'variation', 'digital', 'full_art', 'textless', 'booster', 'story_spotlight'];
+
+    if (in_array($field, $integer_fields)) {
+        return ($value === '' || $value === null) ? 0 : (int)$value;
+    }
+
+    if (in_array($field, $boolean_fields)) {
+        return ($value === '' || $value === null) ? 0 : (bool)$value;
+    }
+
+    return $value;
+}
+
+function determine_param_types($values)
+{
+    $types = '';
+    foreach ($values as $value) {
+        if (is_int($value)) {
+            $types .= 'i';
+        } elseif (is_double($value)) {
+            $types .= 'd';
+        } elseif (is_bool($value)) {
+            $types .= 'i'; // MySQLi no tiene un tipo booleano específico, usar 'i' para enteros
+        } else {
+            $types .= 's';
+        }
+    }
+    return $types;
+}
+
+$conn = new mysqli('localhost', 'root', 'asdqwe123', 'mtg');
+
+if ($conn->connect_error) {
+    die("Connection failed: " . $conn->connect_error);
+}
+
 try {
-    $data = fetch_cards();
-    if (isset($data['data']) && is_array($data['data'])) {
+    $page = 1;
+    $has_more = true;
+
+    while ($has_more) {
+        $data = fetch_cards_page($page);
         foreach ($data['data'] as $card) {
             insert_or_update_card($conn, $card);
         }
-    } else {
-        throw new Exception("La respuesta de la API no contiene datos válidos.");
+        $has_more = $data['has_more'];
+        $page++;
+        delay(100); // Esperar 100 milisegundos entre solicitudes
     }
 } catch (Exception $e) {
     echo "An error occurred: " . $e->getMessage();
 }
 
-// Cerrar la conexión a la base de datos
 $conn->close();
